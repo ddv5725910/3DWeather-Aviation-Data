@@ -1,0 +1,59 @@
+name: Update FAA PJA snapshot
+
+on:
+  schedule:
+    - cron: '43 8 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-aviation-live-data
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate builders
+        run: node --test tests/pja-data.test.mjs
+      - name: Restore last published snapshots
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p previous dist
+          cp data/*.js dist/
+          gh release download aviation-live-data --pattern 'pja.js' --dir previous --clobber || true
+          if test -f previous/pja.js; then
+            cp previous/pja.js dist/pja.js
+          else
+            cp data/pja.js previous/pja.js
+          fi
+      - name: Build and validate current PJA snapshot
+        env:
+          PJA_OUTPUT: dist/pja.js
+        run: |
+          node scripts/build-pja.mjs
+          node --check dist/pja.js
+          node scripts/validate-aviation-assets.mjs dist
+      - name: Replace fixed release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if cmp -s previous/pja.js dist/pja.js; then
+            echo "FAA PJA snapshot is unchanged."
+            exit 0
+          fi
+          if ! gh release view aviation-live-data >/dev/null 2>&1; then
+            gh release create aviation-live-data \
+              --title "Live aviation data" \
+              --notes "Automatically replaced FAA and AWC snapshots for 3DWeather." \
+              --prerelease
+          fi
+          gh release upload aviation-live-data dist/pja.js --clobber

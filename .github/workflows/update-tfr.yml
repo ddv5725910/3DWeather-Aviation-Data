@@ -1,0 +1,57 @@
+name: Update FAA TFR snapshot
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-aviation-live-data
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate builders
+        run: node --test tests/tfr-data.test.mjs
+      - name: Restore last published snapshots
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p previous dist
+          cp data/*.js dist/
+          gh release download aviation-live-data --pattern 'tfr.js' --dir previous --clobber || true
+          if test -f previous/tfr.js; then
+            cp previous/tfr.js dist/tfr.js
+          else
+            cp data/tfr.js previous/tfr.js
+          fi
+      - name: Build and validate current TFR snapshot
+        run: |
+          node scripts/build-tfr.mjs dist/tfr.js
+          node --check dist/tfr.js
+          node scripts/validate-aviation-assets.mjs dist
+      - name: Replace fixed release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if cmp -s previous/tfr.js dist/tfr.js; then
+            echo "FAA TFR snapshot is unchanged."
+            exit 0
+          fi
+          if ! gh release view aviation-live-data >/dev/null 2>&1; then
+            gh release create aviation-live-data \
+              --title "Live aviation data" \
+              --notes "Automatically replaced FAA and AWC snapshots for 3DWeather." \
+              --prerelease
+          fi
+          gh release upload aviation-live-data dist/tfr.js --clobber
