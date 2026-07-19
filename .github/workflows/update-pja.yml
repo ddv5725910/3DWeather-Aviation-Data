@@ -9,8 +9,8 @@ permissions:
   contents: write
 
 concurrency:
-  group: update-aviation-live-data
-  cancel-in-progress: false
+  group: update-faa-pja
+  cancel-in-progress: true
 
 jobs:
   update:
