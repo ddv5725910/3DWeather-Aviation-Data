@@ -2,6 +2,19 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
+import { pjaZipCandidates } from '../scripts/build-pja.mjs';
+
+test('FAA PJA cycle URLs use the latest effective 28-day cycle and one fallback', () => {
+  assert.deepEqual(pjaZipCandidates(Date.UTC(2026, 6, 18)), [
+    'https://nfdc.faa.gov/webContent/28DaySub/extra/09_Jul_2026_PJA_CSV.zip',
+    'https://nfdc.faa.gov/webContent/28DaySub/extra/11_Jun_2026_PJA_CSV.zip'
+  ]);
+  assert.deepEqual(pjaZipCandidates(Date.UTC(2026, 7, 6)), [
+    'https://nfdc.faa.gov/webContent/28DaySub/extra/06_Aug_2026_PJA_CSV.zip',
+    'https://nfdc.faa.gov/webContent/28DaySub/extra/09_Jul_2026_PJA_CSV.zip'
+  ]);
+});
+
 test('checked-in PJA fallback is a plausible browser snapshot', () => {
   const text = readFileSync(new URL('../data/pja.js', import.meta.url), 'utf8');
   const snapshot = JSON.parse(text.replace(/^\s*window\.PJA_DATA\s*=\s*/, '').replace(/;\s*$/, ''));

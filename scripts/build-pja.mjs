@@ -17,14 +17,20 @@
 // ============================================================================
 
 import { execFileSync } from 'node:child_process';
-import { writeFileSync, readFileSync, mkdtempSync, mkdirSync } from 'node:fs';
+import { writeFileSync, readFileSync, mkdtempSync, mkdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = process.env.PJA_OUTPUT ? resolve(process.env.PJA_OUTPUT) : join(ROOT, 'data', 'pja.js');
 const SUB = 'https://www.faa.gov/air_traffic/flight_info/aeronav/aero_data/NASR_Subscription/';
+const EXTRA = 'https://nfdc.faa.gov/webContent/28DaySub/extra/';
+const USER_AGENT = '3DWeather PJA snapshot builder (https://github.com/ddv5725910/3DWeather-Aviation-Data)';
+const UNZIP = process.env.PJA_UNZIP || (existsSync('/usr/bin/unzip') ? '/usr/bin/unzip' : 'unzip');
+const DAY_MS = 86400000;
+const NASR_CYCLE_ANCHOR = Date.UTC(2026, 6, 9);
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 // —— 极简 CSV 解析（处理带引号、含逗号的字段）——
 function parseCSV(text) {
@@ -64,7 +70,26 @@ function convert(csv) {
   return { js: 'window.PJA_DATA=' + JSON.stringify(out) + ';\n', count: out.length };
 }
 
-async function fetchText(u) { const r = await fetch(u); if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + u); return r.text(); }
+async function fetchResponse(url) {
+  const response = await fetch(url, { headers: { 'User-Agent': USER_AGENT } });
+  if (!response.ok) throw new Error('HTTP ' + response.status + ' ' + url);
+  return response;
+}
+
+async function fetchText(url) {
+  return (await fetchResponse(url)).text();
+}
+
+function cycleZipUrl(timestamp) {
+  const date = new Date(timestamp);
+  const day = String(date.getUTCDate()).padStart(2, '0');
+  return `${EXTRA}${day}_${MONTH_NAMES[date.getUTCMonth()]}_${date.getUTCFullYear()}_PJA_CSV.zip`;
+}
+
+export function pjaZipCandidates(now = Date.now()) {
+  const cycle = Math.floor((now - NASR_CYCLE_ANCHOR) / (28 * DAY_MS));
+  return [cycle, cycle - 1].map(offset => cycleZipUrl(NASR_CYCLE_ANCHOR + offset * 28 * DAY_MS));
+}
 
 async function resolveZipUrl() {
   let page = await fetchText(SUB);
@@ -78,21 +103,43 @@ async function resolveZipUrl() {
   return m[0];
 }
 
+async function downloadCurrentZip() {
+  const candidates = pjaZipCandidates();
+  try {
+    const discovered = await resolveZipUrl();
+    if (!candidates.includes(discovered)) candidates.unshift(discovered);
+  } catch (error) {
+    console.warn('警告：FAA 订阅索引不可解析，改用 28 天周期直链：', error.message);
+  }
+  let lastError;
+  for (const zipUrl of candidates) {
+    try {
+      const buf = Buffer.from(await (await fetchResponse(zipUrl)).arrayBuffer());
+      if (buf.length < 1000 || buf[0] !== 0x50 || buf[1] !== 0x4b)
+        throw new Error(`下载内容不是有效 ZIP（${buf.length} bytes）`);
+      return { buf, zipUrl };
+    } catch (error) {
+      lastError = error;
+      console.warn('警告：PJA 周期文件不可用：', zipUrl, error.message);
+    }
+  }
+  throw new Error(`未能下载当前或上一周期 PJA CSV：${lastError?.message || 'unknown error'}`);
+}
+
 async function main() {
   const arg = process.argv[2];
   let csv;
   if (arg && arg.endsWith('.csv')) {
     console.log('读取本地 CSV:', arg); csv = readFileSync(arg, 'utf8');
   } else if (arg && arg.endsWith('.zip')) {
-    console.log('解压本地 zip:', arg); csv = execFileSync('unzip', ['-p', arg, 'PJA_BASE.csv']).toString('utf8');
+    console.log('解压本地 zip:', arg); csv = execFileSync(UNZIP, ['-p', arg, 'PJA_BASE.csv']).toString('utf8');
   } else {
     console.log('解析当前 NASR 周期…');
-    const zipUrl = await resolveZipUrl();
+    const { buf, zipUrl } = await downloadCurrentZip();
     console.log('下载:', zipUrl);
-    const buf = Buffer.from(await (await fetch(zipUrl)).arrayBuffer());
     const zp = join(mkdtempSync(join(tmpdir(), 'pja-')), 'pja.zip');
     writeFileSync(zp, buf);
-    csv = execFileSync('unzip', ['-p', zp, 'PJA_BASE.csv']).toString('utf8');
+    csv = execFileSync(UNZIP, ['-p', zp, 'PJA_BASE.csv']).toString('utf8');
   }
   const { js, count } = convert(csv);
   mkdirSync(dirname(OUT), { recursive: true });
@@ -100,4 +147,6 @@ async function main() {
   console.log(`已写出 ${OUT}（${count} 个跳伞区）`);
 }
 
-main().catch(e => { console.error('失败:', e.message); process.exit(1); });
+const invokedAsScript = process.argv[1] &&
+  import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+if (invokedAsScript) main().catch(e => { console.error('失败:', e.message); process.exit(1); });
