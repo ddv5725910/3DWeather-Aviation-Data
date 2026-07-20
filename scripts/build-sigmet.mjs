@@ -518,8 +518,6 @@ async function main() {
   const existing = readExistingSnapshot(output);
   mergeSigmetSnapshots(snapshot, existing, Date.parse(snapshot.generatedAt));
   validateSigmetSnapshot(snapshot, { previous:existing });
-  if (JSON.stringify(existing?.features) === JSON.stringify(snapshot.features) && existing?.generatedAt)
-    snapshot.generatedAt = existing.generatedAt;
   writeSnapshotAtomic(output, snapshot);
   const { counts } = validateSigmetSnapshot(snapshot);
   const countText = Object.entries(counts).map(([kind, count]) => `${kind} ${count}`).join(' / ');

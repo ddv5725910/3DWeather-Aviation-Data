@@ -322,8 +322,6 @@ async function main() {
   const snapshot = await buildAirmetSnapshot();
   const existing = readExistingSnapshot(output);
   validateAirmetSnapshot(snapshot, { previous:existing, now:Date.parse(snapshot.generatedAt) });
-  if (JSON.stringify(existing?.features) === JSON.stringify(snapshot.features) && existing?.generatedAt)
-    snapshot.generatedAt = existing.generatedAt;
   writeSnapshotAtomic(output, snapshot);
   const { counts } = validateAirmetSnapshot(snapshot, { now:Date.parse(snapshot.generatedAt) });
   const countText = Object.entries(counts).map(([kind, count]) => `${kind} ${count}`).join(' / ');
