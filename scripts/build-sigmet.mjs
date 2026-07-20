@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// Build a browser-ready AWC SIGMET snapshot:
-// Convective SIGMET, SIGMET, and the 2–6 hour Convective Outlook polygons
-// embedded in domestic Convective SIGMET bulletins.
+// Build a browser-ready AWC advisory snapshot:
+// hazard-specific domestic/international SIGMETs, Center Weather Advisories,
+// and the 2–6 hour Convective SIGMET Outlook polygons embedded in domestic
+// Convective SIGMET bulletins.
 
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -15,6 +16,7 @@ const DEFAULT_OUT = resolve(ROOT, 'data/sigmet.js');
 const AWC_BASE = 'https://aviationweather.gov/api/data/';
 const DOMESTIC_URL = AWC_BASE + 'airsigmet?format=geojson';
 const INTERNATIONAL_URL = AWC_BASE + 'isigmet?format=geojson';
+const CWA_URL = AWC_BASE + 'cwa?format=geojson';
 const RAW_URL = AWC_BASE + 'airsigmet?format=raw';
 const NAVAID_QUERY = 'https://services6.arcgis.com/ssFJjBXIUyZDrSYZ/ArcGIS/rest/services/NAVAIDSystem/FeatureServer/0/query';
 const SOURCE_URL = 'https://aviationweather.gov/data/api/';
@@ -23,6 +25,34 @@ const OUTLOOK_TOP_FT = 60000;
 const FETCH_ATTEMPTS = 4;
 const FETCH_TIMEOUT_MS = 20000;
 const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
+export const SIGMET_KINDS = Object.freeze([
+  'SIG_CONV', 'SIG_TC', 'SIG_TURB', 'SIG_ICE', 'SIG_VA', 'SIG_DUST', 'CWA', 'COUT'
+]);
+const SIGMET_HAZARD_KIND = Object.freeze({
+  CONVECTIVE:'SIG_CONV',
+  TS:'SIG_CONV',
+  THUNDERSTORM:'SIG_CONV',
+  THUNDERSTORMS:'SIG_CONV',
+  TC:'SIG_TC',
+  TROPICAL_CYCLONE:'SIG_TC',
+  TURB:'SIG_TURB',
+  TURBULENCE:'SIG_TURB',
+  MTW:'SIG_TURB',
+  MOUNTAIN_WAVE:'SIG_TURB',
+  ICE:'SIG_ICE',
+  ICING:'SIG_ICE',
+  VA:'SIG_VA',
+  VOLCANIC_ASH:'SIG_VA',
+  DS:'SIG_DUST',
+  SS:'SIG_DUST',
+  DU:'SIG_DUST',
+  BD:'SIG_DUST',
+  DUST:'SIG_DUST',
+  SAND:'SIG_DUST',
+  DUST_STORM:'SIG_DUST',
+  SAND_STORM:'SIG_DUST',
+  BLOWING_DUST_SAND:'SIG_DUST'
+});
 const COMPASS_BEARING = Object.freeze({
   N: 0, NNE: 22.5, NE: 45, ENE: 67.5, E: 90, ESE: 112.5, SE: 135, SSE: 157.5,
   S: 180, SSW: 202.5, SW: 225, WSW: 247.5, W: 270, WNW: 292.5, NW: 315, NNW: 337.5
@@ -70,10 +100,24 @@ function finiteNumbers(values) {
   return values.map(Number).filter(Number.isFinite);
 }
 
+function canonicalSigmetHazard(value) {
+  return String(value || '').trim().toUpperCase()
+    .replaceAll(/[^A-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+export function classifySigmetHazard(value) {
+  return SIGMET_HAZARD_KIND[canonicalSigmetHazard(value)] || null;
+}
+
 export function classifyDomesticSigmet(properties) {
   const p = properties || {};
   if (String(p.airSigmetType || '').toUpperCase() !== 'SIGMET') return null;
-  return String(p.hazard || '').toUpperCase() === 'CONVECTIVE' ? 'CSIG' : 'SIG';
+  return classifySigmetHazard(p.hazard);
+}
+
+export function classifyInternationalSigmet(properties) {
+  return classifySigmetHazard(properties?.hazard);
 }
 
 export function sigmetAltitude(properties, kind) {
@@ -248,7 +292,7 @@ async function resolveRouteLocations(areas) {
 
 function commonProperties(kind, name, hazard, series, validity, altitude, raw, bounds) {
   return {
-    WX_SIGMET: 1,
+    WX_WEATHER: 1,
     WX_KIND: kind,
     NAME: name,
     WX_HAZARD: hazard,
@@ -270,7 +314,8 @@ function commonProperties(kind, name, hazard, series, validity, altitude, raw, b
 
 function sigmetName(kind, properties) {
   const p = properties || {};
-  if (kind === 'CSIG') return `CONVECTIVE SIGMET ${p.seriesId || ''}`.trim();
+  if (kind === 'SIG_CONV' && canonicalSigmetHazard(p.hazard) === 'CONVECTIVE')
+    return `CONVECTIVE SIGMET ${p.seriesId || ''}`.trim();
   const hazard = String(p.hazard || '').trim().toUpperCase();
   return `SIGMET ${p.seriesId || ''}${hazard ? ` · ${hazard}` : ''}`.trim();
 }
@@ -283,10 +328,30 @@ function normalizeSigmetFeature(source, kind, prefix) {
   const series = String(p.seriesId || 'UNKNOWN');
   const properties = commonProperties(kind, sigmetName(kind, p), String(p.hazard || '').toUpperCase(), series,
     { from, to }, altitude, String(p.rawAirSigmet || p.rawSigmet || ''), bounds);
+  properties.WX_SIGMET = 1;
   properties.WX_PRODUCT_KEY = `WX|${kind}|${prefix}|${p.icaoId || p.firId || ''}|${series}|${from}`;
   const identity = stableHash([geometry, properties.WX_RAW, altitude, from, to]);
   properties.GLOBAL_ID = `${properties.WX_PRODUCT_KEY}|${identity}`;
   return { type: 'Feature', geometry, properties };
+}
+
+export function normalizeCwaFeature(source) {
+  const p = source?.properties || {};
+  const geometry = normalizeGeometry(source?.geometry), bounds = geometryBounds(geometry);
+  const from = Date.parse(p.validTimeFrom), to = Date.parse(p.validTimeTo);
+  const altitude = sigmetAltitude(p, 'CWA');
+  if (!geometry || !bounds || !Number.isFinite(from) || !Number.isFinite(to) || !altitude) return null;
+  const center = String(p.cwsu || 'CWSU').trim().toUpperCase();
+  const series = String(p.seriesId || 'UNKNOWN').trim().toUpperCase();
+  const hazard = canonicalSigmetHazard(p.hazard);
+  const properties = commonProperties('CWA', `CWA ${center} ${series}${hazard ? ` · ${hazard}` : ''}`,
+    hazard, series, { from, to }, altitude, String(p.cwaText || p.rawText || ''), bounds);
+  properties.WX_CWA = 1;
+  properties.WX_CWSU = center;
+  properties.WX_QUALIFIER = String(p.qualifier || '').trim();
+  properties.WX_PRODUCT_KEY = `WX|CWA|${center}|${series}|${from}`;
+  properties.GLOBAL_ID = `${properties.WX_PRODUCT_KEY}|${stableHash([geometry, properties.WX_RAW, altitude, from, to])}`;
+  return { type:'Feature', geometry, properties };
 }
 
 export function outlookFeature(area, locations) {
@@ -305,6 +370,7 @@ export function outlookFeature(area, locations) {
   const altitude = sigmetAltitude({}, 'COUT');
   const properties = commonProperties('COUT', `CONVECTIVE OUTLOOK · ${regionName} ${area.area}`,
     'CONVECTIVE OUTLOOK', `${area.region || 'US'}${area.area}`, area, altitude, area.raw || '', bounds);
+  properties.WX_SIGMET = 1;
   properties.WX_PRODUCT_KEY = `WX|COUT|${area.code}|${area.region || 'US'}|${area.area}`;
   properties.GLOBAL_ID = `${properties.WX_PRODUCT_KEY}|${stableHash(area.route)}`;
   properties.WX_OUTLOOK = 1;
@@ -329,15 +395,17 @@ function validPolygonGeometry(geometry) {
 
 export function validateSigmetSnapshot(snapshot, options = {}) {
   const now = Number.isFinite(options.now) ? options.now : Date.now();
-  if (!snapshot || snapshot.schemaVersion !== 2 || !Number.isFinite(Date.parse(snapshot.generatedAt)) ||
+  if (!snapshot || snapshot.schemaVersion !== 3 || !Number.isFinite(Date.parse(snapshot.generatedAt)) ||
       !String(snapshot.source || '').includes('aviationweather.gov') || !Array.isArray(snapshot.features))
     throw new Error('SIGMET 快照缺少有效的 schemaVersion、generatedAt、source 或 features');
   if (!snapshot.features.length) throw new Error('SIGMET 快照为空，拒绝覆盖现有数据');
-  const ids = new Set(), counts = { CSIG:0, SIG:0, COUT:0 };
+  const ids = new Set(), counts = Object.fromEntries(SIGMET_KINDS.map(kind => [kind, 0]));
   for (const [index, feature] of snapshot.features.entries()) {
     const p = feature?.properties || {}, kind = p.WX_KIND;
     if (!Object.hasOwn(counts, kind)) throw new Error(`SIGMET 要素 ${index} 的 WX_KIND 无效`);
-    if (!p.WX_PRODUCT_KEY) throw new Error(`SIGMET 要素 ${index} 缺少 WX_PRODUCT_KEY`);
+    if (!p.WX_WEATHER || !p.WX_PRODUCT_KEY) throw new Error(`SIGMET 要素 ${index} 缺少产品元数据`);
+    if (kind === 'CWA' ? !p.WX_CWA : !p.WX_SIGMET)
+      throw new Error(`SIGMET 要素 ${index} 的产品类型标记无效`);
     if (!p.GLOBAL_ID || ids.has(p.GLOBAL_ID)) throw new Error(`SIGMET 要素 ${index} 的 GLOBAL_ID 缺失或重复：${p.GLOBAL_ID || '(empty)'}`);
     ids.add(p.GLOBAL_ID); counts[kind]++;
     if (!validPolygonGeometry(feature.geometry)) throw new Error(`SIGMET 要素 ${p.GLOBAL_ID} 的多边形无效`);
@@ -365,7 +433,8 @@ export function mergeSigmetSnapshots(snapshot, previous, now = Date.now()) {
   const byId = new Map(snapshot.features.map(feature => [feature.properties.GLOBAL_ID, feature]));
   for (const feature of previous.features) {
     const p = feature?.properties || {};
-    if (!p.GLOBAL_ID || !p.WX_PRODUCT_KEY || +p.WX_VALID_TO <= now || currentKeys.has(p.WX_PRODUCT_KEY)) continue;
+    if (!SIGMET_KINDS.includes(p.WX_KIND) || !p.WX_WEATHER || !p.GLOBAL_ID || !p.WX_PRODUCT_KEY ||
+        +p.WX_VALID_TO <= now || currentKeys.has(p.WX_PRODUCT_KEY)) continue;
     byId.set(p.GLOBAL_ID, feature); // AWC 后端节点偶发漏项：仍有效且未被同产品新修订覆盖时沿用上一份
   }
   snapshot.features = [...byId.values()].sort((a,b)=>a.properties.GLOBAL_ID.localeCompare(b.properties.GLOBAL_ID));
@@ -373,11 +442,12 @@ export function mergeSigmetSnapshots(snapshot, previous, now = Date.now()) {
 }
 
 export async function buildSigmetSnapshot() {
-  const [domesticCollection, internationalCollection, rawText] = await Promise.all([
-    fetchPayload(DOMESTIC_URL), fetchPayload(INTERNATIONAL_URL), fetchPayload(RAW_URL, 'text')
+  const [domesticCollection, internationalCollection, cwaCollection, rawText] = await Promise.all([
+    fetchPayload(DOMESTIC_URL), fetchPayload(INTERNATIONAL_URL), fetchPayload(CWA_URL), fetchPayload(RAW_URL, 'text')
   ]);
   validateFeatureCollection(domesticCollection, 'AWC Domestic SIGMET');
   validateFeatureCollection(internationalCollection, 'AWC International SIGMET');
+  validateFeatureCollection(cwaCollection, 'AWC CWA');
   const features = [];
   for (const source of domesticCollection.features) {
     const kind = classifyDomesticSigmet(source.properties);
@@ -386,7 +456,13 @@ export async function buildSigmetSnapshot() {
     if (feature) features.push(feature);
   }
   for (const source of internationalCollection.features) {
-    const feature = normalizeSigmetFeature(source, 'SIG', 'INTL');
+    const kind = classifyInternationalSigmet(source.properties);
+    if (!kind) continue;
+    const feature = normalizeSigmetFeature(source, kind, 'INTL');
+    if (feature) features.push(feature);
+  }
+  for (const source of cwaCollection.features) {
+    const feature = normalizeCwaFeature(source);
     if (feature) features.push(feature);
   }
 
@@ -410,7 +486,7 @@ export async function buildSigmetSnapshot() {
     .filter(feature => +feature.properties.WX_VALID_TO > generatedAt)
     .map(feature => [feature.properties.GLOBAL_ID, feature])).values()]; // AWC 偶尔重复返回完全相同的国际 SIGMET
   currentFeatures.sort((a, b) => a.properties.GLOBAL_ID.localeCompare(b.properties.GLOBAL_ID));
-  const snapshot = { schemaVersion:2, generatedAt:new Date(generatedAt).toISOString(), source:SOURCE_URL, features:currentFeatures };
+  const snapshot = { schemaVersion:3, generatedAt:new Date(generatedAt).toISOString(), source:SOURCE_URL, features:currentFeatures };
   validateSigmetSnapshot(snapshot, { now:generatedAt });
   return snapshot;
 }
@@ -437,7 +513,7 @@ function writeSnapshotAtomic(output, snapshot) {
 
 async function main() {
   const output = process.argv[2] ? resolve(process.argv[2]) : DEFAULT_OUT;
-  console.log('正在读取 AWC SIGMET、国际 SIGMET 与 Convective Outlook…');
+  console.log('正在读取 AWC 国内/国际 SIGMET、CWA 与 Convective SIGMET Outlook…');
   const snapshot = await buildSigmetSnapshot();
   const existing = readExistingSnapshot(output);
   mergeSigmetSnapshots(snapshot, existing, Date.parse(snapshot.generatedAt));

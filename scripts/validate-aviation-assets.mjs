@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { validateSigmetSnapshot } from './build-sigmet.mjs';
+import { validateAirmetSnapshot } from './build-airmet.mjs';
 
 const directory = resolve(process.argv[2] || 'data');
 
@@ -62,9 +63,11 @@ function validatePja(snapshot) {
 
 const tfr = readClassicScript('tfr.js', 'TFR_DATA');
 const sigmet = readClassicScript('sigmet.js', 'SIGMET_DATA');
+const airmet = readClassicScript('airmet.js', 'AIRMET_DATA');
 const pja = readClassicScript('pja.js', 'PJA_DATA');
 const tfrCount = validateTfr(tfr);
 const sigmetResult = validateSigmetSnapshot(sigmet, { now: Date.parse(sigmet.generatedAt) });
+const airmetResult = validateAirmetSnapshot(airmet, { now: Date.parse(airmet.generatedAt) });
 const pjaCount = validatePja(pja);
 
-console.log(`Validated aviation assets: TFR ${tfrCount}, SIGMET ${sigmetResult.features}, PJA ${pjaCount}`);
+console.log(`Validated aviation assets: TFR ${tfrCount}, SIGMET ${sigmetResult.features}, AIRMET ${airmetResult.features}, PJA ${pjaCount}`);

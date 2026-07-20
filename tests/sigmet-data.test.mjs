@@ -4,9 +4,12 @@ import { readFileSync } from 'node:fs';
 
 import {
   classifyDomesticSigmet,
+  classifyInternationalSigmet,
+  classifySigmetHazard,
   destinationPoint,
   fetchPayload,
   mergeSigmetSnapshots,
+  normalizeCwaFeature,
   outlookFeature,
   parseOutlookAreas,
   parseOutlookValidity,
@@ -16,22 +19,54 @@ import {
 } from '../scripts/build-sigmet.mjs';
 import { signedRingArea } from '../scripts/build-tfr.mjs';
 
-test('1800WXBrief-style domestic classification separates Convective SIGMET and SIGMET', () => {
-  assert.equal(classifyDomesticSigmet({ airSigmetType: 'SIGMET', hazard: 'CONVECTIVE' }), 'CSIG');
-  assert.equal(classifyDomesticSigmet({ airSigmetType: 'SIGMET', hazard: 'TURB' }), 'SIG');
+test('SIGMET classification exposes pilot-facing hazard layers for domestic and international products', () => {
+  assert.equal(classifyDomesticSigmet({ airSigmetType: 'SIGMET', hazard: 'CONVECTIVE' }), 'SIG_CONV');
+  assert.equal(classifyDomesticSigmet({ airSigmetType: 'SIGMET', hazard: 'TURB' }), 'SIG_TURB');
   assert.equal(classifyDomesticSigmet({ airSigmetType: 'AIRMET', hazard: 'TURB' }), null);
+  assert.equal(classifyInternationalSigmet({ hazard:'TS' }), 'SIG_CONV');
+  assert.equal(classifyInternationalSigmet({ hazard:'TC' }), 'SIG_TC');
+  assert.equal(classifyInternationalSigmet({ hazard:'MTW' }), 'SIG_TURB');
+  assert.equal(classifySigmetHazard('volcanic ash'), 'SIG_VA');
+  assert.equal(classifySigmetHazard('dust storm'), 'SIG_DUST');
+  assert.equal(classifySigmetHazard('unknown'), null);
 });
 
 test('SIGMET altitude envelopes preserve known bounds and flag conservative fallbacks', () => {
-  assert.deepEqual(sigmetAltitude({ altitudeLow1: 18000, altitudeHi1: 42000 }, 'CSIG'), {
+  assert.deepEqual(sigmetAltitude({ altitudeLow1: 18000, altitudeHi1: 42000 }, 'SIG_CONV'), {
     lowerVal: 18000, lowerCode: 'MSL', upperVal: 42000, upperCode: 'MSL', baseKnown: true, topKnown: true
   });
-  assert.deepEqual(sigmetAltitude({ base: null, top: 38000 }, 'SIG'), {
+  assert.deepEqual(sigmetAltitude({ base: null, top: 38000 }, 'SIG_TURB'), {
     lowerVal: 0, lowerCode: 'SFC', upperVal: 38000, upperCode: 'MSL', baseKnown: false, topKnown: true
   });
   assert.deepEqual(sigmetAltitude({}, 'COUT'), {
     lowerVal: 0, lowerCode: 'SFC', upperVal: 60000, upperCode: 'UNL', baseKnown: false, topKnown: false
   });
+});
+
+test('CWA normalization preserves its center, hazard, validity, geometry, and vertical metadata', () => {
+  const feature = normalizeCwaFeature({
+    type:'Feature',
+    properties:{
+      cwsu:'ZLC',
+      seriesId:'201',
+      validTimeFrom:'2026-07-19T18:00:00.000Z',
+      validTimeTo:'2026-07-19T20:00:00.000Z',
+      hazard:'TS',
+      qualifier:'DVLPG',
+      cwaText:'ZLC CWA 201 VALID UNTIL 192000',
+      base:8000,
+      top:42000
+    },
+    geometry:{ type:'Polygon', coordinates:[[[-112,39],[-110,39],[-111,41],[-112,39]]] }
+  });
+  assert.equal(feature.properties.WX_KIND, 'CWA');
+  assert.equal(feature.properties.WX_CWA, 1);
+  assert.equal(feature.properties.WX_CWSU, 'ZLC');
+  assert.equal(feature.properties.WX_HAZARD, 'TS');
+  assert.equal(feature.properties.LOWER_VAL, 8000);
+  assert.equal(feature.properties.UPPER_VAL, 42000);
+  assert.match(feature.properties.NAME, /^CWA ZLC 201/);
+  assert.deepEqual(feature.properties.WX_BBOX, [-112,39,-110,41]);
 });
 
 test('Convective Outlook parser handles wrapped routes and multiple numbered areas', () => {
@@ -104,12 +139,13 @@ test('AWC fetch retries transient errors and immediately preserves a successful 
   assert.equal(payload.type, 'FeatureCollection');
 });
 
-function snapshotFeature(id, validTo, kind = 'SIG') {
+function snapshotFeature(id, validTo, kind = 'SIG_TURB') {
   return {
     type:'Feature',
     geometry:{ type:'Polygon', coordinates:[[[-100,35],[-99,35],[-99,36],[-100,35]]] },
     properties:{
-      GLOBAL_ID:id, WX_PRODUCT_KEY:`product-${id}`, WX_KIND:kind, WX_VALID_FROM:validTo-3600000, WX_VALID_TO:validTo,
+      GLOBAL_ID:id, WX_PRODUCT_KEY:`product-${id}`, WX_WEATHER:1, WX_SIGMET:1,
+      WX_KIND:kind, WX_VALID_FROM:validTo-3600000, WX_VALID_TO:validTo,
       WX_BBOX:[-100,35,-99,36], LOWER_VAL:0, UPPER_VAL:10000
     }
   };
@@ -117,12 +153,16 @@ function snapshotFeature(id, validTo, kind = 'SIG') {
 
 test('snapshot validation rejects malformed, expired, duplicate, and suspiciously partial updates', () => {
   const now = Date.UTC(2026, 6, 17, 6);
-  const base = { schemaVersion:2, generatedAt:new Date(now).toISOString(), source:'https://aviationweather.gov/data/api/' };
+  const base = { schemaVersion:3, generatedAt:new Date(now).toISOString(), source:'https://aviationweather.gov/data/api/' };
   const valid = { ...base, features:[snapshotFeature('one',now+3600000)] };
-  assert.deepEqual(validateSigmetSnapshot(valid,{now}).counts,{CSIG:0,SIG:1,COUT:0});
+  assert.deepEqual(validateSigmetSnapshot(valid,{now}).counts,{
+    SIG_CONV:0,SIG_TC:0,SIG_TURB:1,SIG_ICE:0,SIG_VA:0,SIG_DUST:0,CWA:0,COUT:0
+  });
   assert.throws(()=>validateSigmetSnapshot({...base,features:[]},{now}),/为空/);
   assert.throws(()=>validateSigmetSnapshot({...base,features:[snapshotFeature('old',now)]},{now}),/已经过期/);
   assert.throws(()=>validateSigmetSnapshot({...base,features:[snapshotFeature('same',now+1),snapshotFeature('same',now+2)]},{now}),/重复/);
+  const cwa=snapshotFeature('cwa',now+3600000,'CWA'); delete cwa.properties.WX_SIGMET; cwa.properties.WX_CWA=1;
+  assert.equal(validateSigmetSnapshot({...base,features:[cwa]},{now}).counts.CWA,1);
   const previous={features:Array.from({length:30},(_,index)=>snapshotFeature(`old-${index}`,now+3600000))};
   assert.throws(()=>validateSigmetSnapshot(valid,{now,previous}),/保护阈值/);
 });

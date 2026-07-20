@@ -12,12 +12,15 @@ routine updates do not grow Git history.
 | Asset | Source | Update check |
 |---|---|---|
 | `tfr.js` | FAA Temporary Flight Restrictions | Hourly at minute 17 |
-| `sigmet.js` | Aviation Weather Center SIGMET and Convective Outlook products | Every 5 minutes |
+| `sigmet.js` | Aviation Weather Center SIGMET, CWA, and Convective SIGMET Outlook products | Every 5 minutes |
+| `airmet.js` | Aviation Weather Center G-AIRMET hazards and freezing levels | Every 5 minutes |
 | `pja.js` | FAA NASR parachute jumping areas | Weekly |
 
 Every workflow restores the last published asset before building, validates all
-three classic scripts, skips byte-identical updates, and uploads only its own
-asset. The release is public and can be consumed without GitHub authentication.
+four classic scripts, skips byte-identical updates, and uploads only its own
+assets. AWC publishing stages each replacement before swapping names so a
+transient GitHub upload failure cannot delete the currently published snapshot.
+The release is public and can be consumed without GitHub authentication.
 
 The data is provided as-is from the cited official sources. It is for
 visualization and must not be used as a substitute for official preflight

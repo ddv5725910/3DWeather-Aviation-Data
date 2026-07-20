@@ -1,4 +1,4 @@
-name: Update AWC SIGMET snapshot
+name: Update AWC weather snapshots
 
 on:
   schedule:
@@ -9,13 +9,13 @@ permissions:
   contents: write
 
 concurrency:
-  group: update-awc-sigmet
+  group: update-awc-weather
   cancel-in-progress: true
 
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -23,36 +23,83 @@ jobs:
           node-version: '22'
           package-manager-cache: false
       - name: Validate builders
-        run: node --test tests/tfr-data.test.mjs tests/sigmet-data.test.mjs
+        run: node --test tests/tfr-data.test.mjs tests/sigmet-data.test.mjs tests/airmet-data.test.mjs
       - name: Restore last published snapshots
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p previous dist
           cp data/*.js dist/
-          gh release download aviation-live-data --pattern 'sigmet.js' --dir previous --clobber || true
-          if test -f previous/sigmet.js; then
-            cp previous/sigmet.js dist/sigmet.js
-          else
-            cp data/sigmet.js previous/sigmet.js
-          fi
-      - name: Build and validate current AWC snapshot
+          gh release download aviation-live-data --pattern 'sigmet.js' --pattern 'airmet.js' --dir previous --clobber || true
+          for asset in sigmet.js airmet.js; do
+            if test -f "previous/$asset"; then
+              cp "previous/$asset" "dist/$asset"
+            else
+              cp "data/$asset" "previous/$asset"
+            fi
+          done
+      - name: Build and validate current AWC snapshots
         run: |
           node scripts/build-sigmet.mjs dist/sigmet.js
+          node scripts/build-airmet.mjs dist/airmet.js
           node --check dist/sigmet.js
+          node --check dist/airmet.js
           node scripts/validate-aviation-assets.mjs dist
-      - name: Replace fixed release asset
+      - name: Replace fixed release assets safely
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if cmp -s previous/sigmet.js dist/sigmet.js; then
-            echo "AWC SIGMET snapshot is unchanged."
-            exit 0
-          fi
+          set -euo pipefail
           if ! gh release view aviation-live-data >/dev/null 2>&1; then
             gh release create aviation-live-data \
               --title "Live aviation data" \
               --notes "Automatically replaced FAA and AWC snapshots for 3DWeather." \
               --prerelease
           fi
-          gh release upload aviation-live-data dist/sigmet.js --clobber
+
+          release_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/aviation-live-data" --jq .id)
+          publish_asset() {
+            asset=$1
+            if cmp -s "previous/$asset" "dist/$asset"; then
+              echo "$asset is unchanged."
+              return
+            fi
+
+            candidate="${asset}.candidate.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"
+            cp "dist/$asset" "$candidate"
+            uploaded=0
+            for attempt in 1 2 3 4 5; do
+              if gh release upload aviation-live-data "$candidate" --clobber; then
+                uploaded=1
+                break
+              fi
+              sleep $((attempt * 5))
+            done
+            if test "$uploaded" -ne 1; then
+              echo "Failed to upload staged $asset after retries." >&2
+              exit 1
+            fi
+
+            assets=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets" --paginate)
+            candidate_id=$(jq -r --arg name "$candidate" 'map(select(.name == $name)) | first | .id // empty' <<<"$assets")
+            old_id=$(jq -r --arg name "$asset" 'map(select(.name == $name)) | first | .id // empty' <<<"$assets")
+            test -n "$candidate_id"
+
+            backup="${asset}.previous.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"
+            if test -n "$old_id"; then
+              gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/assets/${old_id}" -f name="$backup" >/dev/null
+            fi
+            if ! gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/assets/${candidate_id}" -f name="$asset" >/dev/null; then
+              if test -n "$old_id"; then
+                gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/assets/${old_id}" -f name="$asset" >/dev/null || true
+              fi
+              exit 1
+            fi
+            if test -n "$old_id"; then
+              gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${old_id}"
+            fi
+            echo "Published $asset."
+          }
+
+          publish_asset sigmet.js
+          publish_asset airmet.js
