@@ -9,7 +9,7 @@ import {
   regionKeysForBounds
 } from '../scripts/base-data-utils.mjs';
 import { compactOurAirports, compactOurRunways } from '../scripts/build-ourairports-base.mjs';
-import { clipFeatureToRegion } from '../scripts/build-faa-base.mjs';
+import { clipFeatureToRegion, simplifyRing } from '../scripts/build-faa-base.mjs';
 
 test('region keys are stable for negative FAA coordinates', () => {
   assert.equal(regionKey(-125, 35), 'm125-p35');
@@ -31,6 +31,13 @@ test('FAA polygon geometry is clipped instead of copied across regions', () => {
   const clipped = clipFeatureToRegion(feature, -125, 35, 5);
   assert.equal(clipped.geometry.type, 'Polygon');
   assert.deepEqual(featureBounds(clipped), [-125, 37, -120, 40]);
+});
+
+test('FAA arc sampling is simplified while preserving closure and winding', () => {
+  const ring = [[-122, 37], [-121.99999, 37.000001], [-121.99998, 37.000002], [-121, 37], [-121, 38], [-122, 38], [-122, 37]];
+  const simplified = simplifyRing(ring, 5);
+  assert.ok(simplified.length < ring.length);
+  assert.deepEqual(simplified[0], simplified.at(-1));
 });
 
 test('CSV parser and OurAirports compactors preserve quoted commas', () => {

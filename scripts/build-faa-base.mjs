@@ -15,6 +15,8 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const OUTPUT = resolve(process.env.BASE_DATA_OUTPUT || resolve(ROOT, 'dist/base'));
 const AIRSPACE_STEP = 5;
 const AIRPORT_MAP_STEP = 5;
+const D2R = Math.PI / 180;
+const GEOMETRY_TOLERANCE_M = 5;
 
 function progress({ service, completed, pages, count }) {
   console.log(`${service}: page ${completed}/${pages}, ${count} source features`);
@@ -22,6 +24,117 @@ function progress({ service, completed, pages, count }) {
 
 function prop(feature, key) {
   return String(feature?.properties?.[key] || '').toUpperCase();
+}
+
+function unwrapRing(ring, anchorLon = null) {
+  if (!ring || ring.length < 2) return [];
+  let length = ring.length;
+  const closed = ring[0][0] === ring[length - 1][0] && ring[0][1] === ring[length - 1][1];
+  if (closed) length--;
+  const out = [];
+  let previous = anchorLon == null ? +ring[0][0] : anchorLon;
+  for (let index = 0; index < length; index++) {
+    let lon = +ring[index][0];
+    while (lon - previous > 180) lon -= 360;
+    while (lon - previous < -180) lon += 360;
+    out.push([lon, +ring[index][1]]);
+    previous = lon;
+  }
+  if (out.length) out.push(out[0].slice());
+  return out;
+}
+
+function segmentDistanceSq(point, start, end, scaleX, scaleY) {
+  let x = start[0] * scaleX, y = start[1] * scaleY;
+  let dx = end[0] * scaleX - x, dy = end[1] * scaleY - y;
+  const px = point[0] * scaleX, py = point[1] * scaleY;
+  if (dx || dy) {
+    const fraction = ((px - x) * dx + (py - y) * dy) / (dx * dx + dy * dy);
+    if (fraction > 1) { x += dx; y += dy; }
+    else if (fraction > 0) { x += dx * fraction; y += dy * fraction; }
+  }
+  dx = px - x; dy = py - y;
+  return dx * dx + dy * dy;
+}
+
+function ringArea2(ring) {
+  let area = 0;
+  for (let index = 0; index + 1 < ring.length; index++)
+    area += ring[index][0] * ring[index + 1][1] - ring[index + 1][0] * ring[index][1];
+  return area;
+}
+
+function orient(a, b, c) {
+  return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+}
+
+function segmentsCross(a, b, c, d) {
+  const epsilon = 1e-12;
+  const o1 = orient(a, b, c), o2 = orient(a, b, d), o3 = orient(c, d, a), o4 = orient(c, d, b);
+  const on = (p, q, r) => Math.abs(orient(p, q, r)) <= epsilon &&
+    r[0] >= Math.min(p[0], q[0]) - epsilon && r[0] <= Math.max(p[0], q[0]) + epsilon &&
+    r[1] >= Math.min(p[1], q[1]) - epsilon && r[1] <= Math.max(p[1], q[1]) + epsilon;
+  return (((o1 > epsilon && o2 < -epsilon) || (o1 < -epsilon && o2 > epsilon)) &&
+    ((o3 > epsilon && o4 < -epsilon) || (o3 < -epsilon && o4 > epsilon))) ||
+    on(a, b, c) || on(a, b, d) || on(c, d, a) || on(c, d, b);
+}
+
+function ringSelfIntersects(ring) {
+  const length = ring.length - 1;
+  if (length < 4) return false;
+  for (let i = 0; i < length; i++) for (let j = i + 2; j < length; j++) {
+    if (i === 0 && j === length - 1) continue;
+    const a = ring[i], b = ring[i + 1], c = ring[j], d = ring[j + 1];
+    if (Math.max(a[0], b[0]) < Math.min(c[0], d[0]) || Math.max(c[0], d[0]) < Math.min(a[0], b[0]) ||
+        Math.max(a[1], b[1]) < Math.min(c[1], d[1]) || Math.max(c[1], d[1]) < Math.min(a[1], b[1])) continue;
+    if (segmentsCross(a, b, c, d)) return true;
+  }
+  return false;
+}
+
+export function simplifyRing(ring, toleranceM = GEOMETRY_TOLERANCE_M) {
+  if (!ring || ring.length < 6 || toleranceM <= 0) return ring;
+  const unwrapped = unwrapRing(ring), body = unwrapped.slice(0, -1);
+  if (body.length < 5) return ring;
+  let pivot = 0, latitude = 0;
+  for (let index = 0; index < body.length; index++) {
+    latitude += body[index][1];
+    if (body[index][0] < body[pivot][0] ||
+        (body[index][0] === body[pivot][0] && body[index][1] < body[pivot][1])) pivot = index;
+  }
+  latitude /= body.length;
+  const points = body.slice(pivot).concat(body.slice(0, pivot), [body[pivot]]);
+  const scaleX = 111320 * Math.max(0.05, Math.cos(latitude * D2R)), scaleY = 111320;
+  const toleranceSq = toleranceM * toleranceM, keep = new Uint8Array(points.length);
+  keep[0] = keep[points.length - 1] = 1;
+  const stack = [[0, points.length - 1]];
+  while (stack.length) {
+    const [start, end] = stack.pop();
+    let best = toleranceSq, at = -1;
+    for (let index = start + 1; index < end; index++) {
+      const distance = segmentDistanceSq(points[index], points[start], points[end], scaleX, scaleY);
+      if (distance > best) { best = distance; at = index; }
+    }
+    if (at >= 0) { keep[at] = 1; stack.push([start, at], [at, end]); }
+  }
+  const out = [];
+  for (let index = 0; index < points.length; index++) if (keep[index]) out.push(points[index]);
+  if (out.length < 4) return ring;
+  out[out.length - 1] = out[0].slice();
+  const sourceArea = ringArea2(unwrapped), outputArea = ringArea2(out);
+  const ratio = Math.abs(outputArea) / Math.max(1e-18, Math.abs(sourceArea));
+  if (sourceArea * outputArea <= 0 || ratio < 0.8 || ratio > 1.25 || ringSelfIntersects(out)) return ring;
+  return out.map(point => [(((point[0] + 180) % 360) + 360) % 360 - 180, point[1]]);
+}
+
+function simplifyGeometry(geometry) {
+  if (!geometry?.coordinates) return geometry;
+  const simplifyPolygon = polygon => (polygon || []).map(ring => simplifyRing(ring)).filter(ring => ring?.length >= 4);
+  if (geometry.type === 'Polygon') return { type:'Polygon', coordinates:simplifyPolygon(geometry.coordinates) };
+  if (geometry.type === 'MultiPolygon') return {
+    type:'MultiPolygon', coordinates:geometry.coordinates.map(simplifyPolygon).filter(polygon => polygon.length)
+  };
+  return geometry;
 }
 
 function supportedRegion(west, south, step) {
@@ -78,9 +191,10 @@ export function clipFeatureToRegion(feature, west, south, step) {
 
 function addLayer(regions, name, features, step) {
   for (const feature of features || []) {
-    for (const region of regionKeysForBounds(featureBounds(feature), step)) {
+    const simplified = { geometry:simplifyGeometry(feature.geometry), properties:feature.properties || {} };
+    for (const region of regionKeysForBounds(featureBounds(simplified), step)) {
       if (!supportedRegion(region.west, region.south, step)) continue;
-      const clipped = clipFeatureToRegion(feature, region.west, region.south, step);
+      const clipped = clipFeatureToRegion(simplified, region.west, region.south, step);
       if (!clipped) continue;
       let target = regions.get(region.key);
       if (!target) regions.set(region.key, target = { ...region, layers:{} });
@@ -114,12 +228,12 @@ export async function buildFaaBase(options = {}) {
     query('NAVAIDSystem', { outFields:'OBJECTID,IDENT,NAME_TXT,COUNTRY', pageSize:1000, onProgress:progress }),
     query('Class_Airspace', {
       outFields:'GLOBAL_ID,NAME,CLASS,IDENT,LOCAL_TYPE,LOWER_DESC,LOWER_VAL,LOWER_UOM,LOWER_CODE,UPPER_DESC,UPPER_VAL,UPPER_UOM,UPPER_CODE',
-      geometryPrecision:5, maxAllowableOffset:0.00005,
+      geometryPrecision:5,
       pageSize:250, concurrency:4, timeoutMs:120000, onProgress:progress
     }),
     query('Special_Use_Airspace', {
       outFields:'GLOBAL_ID,NAME,TYPE_CODE,LOWER_VAL,LOWER_UOM,LOWER_CODE,UPPER_VAL,UPPER_UOM,UPPER_CODE',
-      geometryPrecision:5, maxAllowableOffset:0.00005,
+      geometryPrecision:5,
       pageSize:250, concurrency:4, timeoutMs:120000, onProgress:progress
     })
   ]);
