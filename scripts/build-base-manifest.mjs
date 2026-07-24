@@ -39,4 +39,4 @@ const manifest = {
 };
 writeFileSync(resolve(OUTPUT, 'aviation-base-manifest.js'),
   `(function(g){g.AVIATION_BASE_MANIFEST=Object.freeze(${JSON.stringify(manifest)});})(typeof window!=="undefined"?window:globalThis);\n`);
-console.log(`Aviation base manifest ${datasetId}: ${faa.assetCount + 1} release assets`);
+console.log(`Aviation base manifest ${datasetId}: ${faa.assetCount} release assets`);

@@ -35,6 +35,11 @@ The weekly `Update aviation base data` workflow publishes:
 The browser reads the stable manifest first and then immutable JSON assets. Direct
 FAA ArcGIS and OurAirports requests remain failure-only fallbacks.
 
+The current full build is about 44 MiB across 206 immutable release assets. Region
+files are clipped and simplified locally to about five-meter tolerance; source
+queries intentionally retain full geometry because the FAA Class Airspace service
+returns null geometry when ArcGIS server-side offset simplification is requested.
+
 Every workflow restores the last published asset before building, validates all
 four classic scripts, skips byte-identical updates, and uploads only its own
 assets. AWC publishing stages each replacement before swapping names so a
