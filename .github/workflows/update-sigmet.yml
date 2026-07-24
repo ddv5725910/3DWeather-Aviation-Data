@@ -39,7 +39,12 @@ jobs:
             fi
           done
       - name: Build and validate current AWC snapshots
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NAVAID_SNAPSHOT: dist/base/navaids.json
         run: |
+          mkdir -p dist/base
+          gh release download aviation-base-data --pattern 'navaids.json' --dir dist/base --clobber || true
           node scripts/build-sigmet.mjs dist/sigmet.js
           node scripts/build-airmet.mjs dist/airmet.js
           node --check dist/sigmet.js

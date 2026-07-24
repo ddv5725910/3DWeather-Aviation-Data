@@ -19,6 +19,8 @@ const INTERNATIONAL_URL = AWC_BASE + 'isigmet?format=geojson';
 const CWA_URL = AWC_BASE + 'cwa?format=geojson';
 const RAW_URL = AWC_BASE + 'airsigmet?format=raw';
 const NAVAID_QUERY = 'https://services6.arcgis.com/ssFJjBXIUyZDrSYZ/ArcGIS/rest/services/NAVAIDSystem/FeatureServer/0/query';
+const NAVAID_SNAPSHOT_URL =
+  'https://github.com/ddv5725910/3DWeather-Aviation-Data/releases/download/aviation-base-data/navaids.json';
 const SOURCE_URL = 'https://aviationweather.gov/data/api/';
 const USER_AGENT = '3DWeather SIGMET snapshot builder (https://github.com/ddv5725910/3DWeather-Aviation-Data)';
 const OUTLOOK_TOP_FT = 60000;
@@ -251,8 +253,29 @@ export function destinationPoint(lat, lon, bearing, distanceNm) {
 async function resolveRouteLocations(areas) {
   const idents = [...new Set(areas.flatMap(area => area.route.map(parseRoutePointToken).filter(Boolean).map(point => point.ident)))];
   const locations = new Map();
-  for (let i = 0; i < idents.length; i += 70) {
-    const chunk = idents.slice(i, i + 70);
+  try {
+    const path = process.env.NAVAID_SNAPSHOT;
+    const snapshot = path && existsSync(path)
+      ? JSON.parse(readFileSync(path, 'utf8'))
+      : await fetchPayload(NAVAID_SNAPSHOT_URL);
+    if (snapshot?.schemaVersion !== 1 || !Array.isArray(snapshot.rows) || snapshot.rows.length < 500)
+      throw new Error('invalid navaid snapshot');
+    const wanted = new Set(idents);
+    for (const row of snapshot.rows) {
+      const ident = String(row?.[0] || '').toUpperCase();
+      const lat = +row?.[3], lon = +row?.[4];
+      if (!wanted.has(ident) || !Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+      const current = locations.get(ident);
+      const preferred = String(row?.[2] || '').toUpperCase() === 'UNITED STATES';
+      if (!current || preferred) locations.set(ident, { lat, lon });
+    }
+  } catch (error) {
+    console.warn(`警告：基础 NAVAID 快照不可用，将查询 FAA：${error.message}`);
+  }
+
+  const unresolvedNavaids = idents.filter(ident => !locations.has(ident));
+  for (let i = 0; i < unresolvedNavaids.length; i += 70) {
+    const chunk = unresolvedNavaids.slice(i, i + 70);
     const params = new URLSearchParams({
       where: `IDENT IN (${chunk.map(value => `'${value}'`).join(',')})`,
       outFields: 'IDENT,NAME_TXT,COUNTRY',
