@@ -32,8 +32,10 @@ The weekly `Update aviation base data` workflow publishes:
 - combined 5-degree Class/Special Use/E airspace regions;
 - combined 5-degree apron, taxiway, runway, and building regions.
 
-The browser reads the stable manifest first and then immutable JSON assets. Direct
-FAA ArcGIS and OurAirports requests remain failure-only fallbacks.
+The browser reads the stable manifest first and then immutable classic-script
+assets. Scripts are used instead of `fetch` JSON because GitHub Release redirects
+do not expose CORS headers to locally opened (`file://`) pages. Direct FAA ArcGIS
+and OurAirports requests remain failure-only fallbacks.
 
 The current full build is about 44 MiB across 206 immutable release assets. Region
 files are clipped and simplified locally to about five-meter tolerance; source

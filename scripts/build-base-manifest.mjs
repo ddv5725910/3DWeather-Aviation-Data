@@ -19,12 +19,12 @@ const manifest = {
   source:'FAA ArcGIS and OurAirports',
   releaseBaseUrl,
   assets:{
-    faaAirports:'faa-airports.json',
-    ourAirports:'ourairports-airports.json',
-    ourRunways:'ourairports-runways.json',
-    navaids:'navaids.json',
-    airspace:{ step:faa.airspace.step, keys:faa.airspace.keys, template:'airspace-{key}.json' },
-    airportMap:{ step:faa.airportMapRegions.step, keys:faa.airportMapRegions.keys, template:'airport-map-{key}.json' }
+    faaAirports:'faa-airports.js',
+    ourAirports:'ourairports-airports.js',
+    ourRunways:'ourairports-runways.js',
+    navaids:'navaids.js',
+    airspace:{ step:faa.airspace.step, keys:faa.airspace.keys, template:'airspace-{key}.js' },
+    airportMap:{ step:faa.airportMapRegions.step, keys:faa.airportMapRegions.keys, template:'airport-map-{key}.js' }
   },
   counts:{
     faaAirports:faa.faaAirports,

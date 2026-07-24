@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import vm from 'node:vm';
 
 import {
   featureBounds,
@@ -10,6 +11,7 @@ import {
 } from '../scripts/base-data-utils.mjs';
 import { compactOurAirports, compactOurRunways } from '../scripts/build-ourairports-base.mjs';
 import { clipFeatureToRegion, simplifyRing } from '../scripts/build-faa-base.mjs';
+import { classicAssetSource } from '../scripts/wrap-base-assets.mjs';
 
 test('region keys are stable for negative FAA coordinates', () => {
   assert.equal(regionKey(-125, 35), 'm125-p35');
@@ -38,6 +40,13 @@ test('FAA arc sampling is simplified while preserving closure and winding', () =
   const simplified = simplifyRing(ring, 5);
   assert.ok(simplified.length < ring.length);
   assert.deepEqual(simplified[0], simplified.at(-1));
+});
+
+test('base assets are classic scripts that load without cross-origin fetch', () => {
+  const context = { Object };
+  context.globalThis = context;
+  vm.runInNewContext(classicAssetSource('airspace-test.js', { schemaVersion:1, layers:{ class:[1] } }), context);
+  assert.equal(context.__AVIATION_BASE_SCRIPT_ASSETS__['airspace-test.js'].layers.class[0], 1);
 });
 
 test('CSV parser and OurAirports compactors preserve quoted commas', () => {
