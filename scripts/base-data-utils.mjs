@@ -16,13 +16,15 @@ function retryDelay(response, attempt) {
   return Math.min(10000, 700 * 2 ** attempt);
 }
 
-export async function fetchResponse(url, options = {}) {
+async function fetchWithRetry(url, options, readResponse = response => response) {
   const attempts = Math.max(1, options.attempts || 4);
   const timeoutMs = Math.max(1000, options.timeoutMs || 30000);
   const fetchImpl = options.fetchImpl || fetch;
   const sleep = options.sleep || wait;
   let lastError;
+  let attemptsUsed = 0;
   for (let attempt = 0; attempt < attempts; attempt++) {
+    attemptsUsed++;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     let response;
@@ -36,7 +38,8 @@ export async function fetchResponse(url, options = {}) {
         error.retryable = RETRYABLE_STATUS.has(response.status);
         throw error;
       }
-      return response;
+      // Keep body decoding and validation within the same timeout/retry budget.
+      return await readResponse(response);
     } catch (error) {
       lastError = error;
       if (error?.retryable === false || attempt + 1 >= attempts) break;
@@ -45,26 +48,54 @@ export async function fetchResponse(url, options = {}) {
       clearTimeout(timeout);
     }
   }
-  throw new Error(`Unable to download base data after ${attempts} attempts: ${lastError?.message || url}`, {
+  throw new Error(`Unable to download ${options.context || 'base data'} after ${attemptsUsed} attempts: ${lastError?.message || url}`, {
     cause:lastError
   });
 }
 
+export async function fetchResponse(url, options = {}) {
+  return fetchWithRetry(url, options);
+}
+
 export async function fetchJson(url, options = {}) {
-  return (await fetchResponse(url, options)).json();
+  return fetchWithRetry(url, options, async response => {
+    const payload = await response.json();
+    options.validate?.(payload);
+    return payload;
+  });
 }
 
 export async function fetchText(url, options = {}) {
   return (await fetchResponse(url, options)).text();
 }
 
+function validateArcgisPayload(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload))
+    throw new Error('ArcGIS returned an invalid response');
+  if (payload.error != null) {
+    const { code, message, details } = payload.error;
+    throw new Error(`ArcGIS error ${code ?? 'unknown'}: ${message || 'Unknown error'}${
+      Array.isArray(details) && details.length ? ` (${details.join('; ')})` : ''}`);
+  }
+}
+
 export async function arcgisFeatures(service, options = {}) {
   const endpoint = `${FAA_ARCGIS_ROOT}/${service}/FeatureServer/0/query`;
   const where = options.where || '1=1';
   const countParams = new URLSearchParams({ where, returnCountOnly:'true', f:'json' });
-  const fetchOptions = { timeoutMs:options.timeoutMs || 60000, attempts:options.attempts || 4 };
-  const count = +(await fetchJson(`${endpoint}?${countParams}`, fetchOptions)).count;
-  if (!Number.isFinite(count) || count < 0) throw new Error(`${service} returned an invalid count: ${count}`);
+  const fetchOptions = {
+    timeoutMs:options.timeoutMs || 60000, attempts:options.attempts || 4,
+    fetchImpl:options.fetchImpl, sleep:options.sleep
+  };
+  const { count } = await fetchJson(`${endpoint}?${countParams}`, {
+    ...fetchOptions,
+    context:`${service} count`,
+    validate(payload) {
+      validateArcgisPayload(payload);
+      if (!Number.isSafeInteger(payload.count) || payload.count < 0)
+        throw new Error(`ArcGIS returned an invalid count: ${payload.count}`);
+    }
+  });
   if (!count) return [];
 
   const pageSize = Math.max(1, Math.min(2000, options.pageSize || 1000));
@@ -76,20 +107,32 @@ export async function arcgisFeatures(service, options = {}) {
     for (;;) {
       const pageIndex = cursor++;
       if (pageIndex >= offsets.length) return;
+      const offset = offsets[pageIndex];
+      const expected = Math.min(pageSize, count - offset);
       const params = new URLSearchParams({
         where,
         outFields:options.outFields || '*',
         returnGeometry:options.returnGeometry === false ? 'false' : 'true',
         outSR:'4326',
         orderByFields:options.orderByFields || 'OBJECTID',
-        resultOffset:String(offsets[pageIndex]),
+        resultOffset:String(offset),
         resultRecordCount:String(pageSize),
         f:options.returnGeometry === false ? 'json' : 'geojson'
       });
       if (options.geometryPrecision != null) params.set('geometryPrecision', String(options.geometryPrecision));
       if (options.maxAllowableOffset != null) params.set('maxAllowableOffset', String(options.maxAllowableOffset));
-      const payload = await fetchJson(`${endpoint}?${params}`, fetchOptions);
-      const features = payload.features || [];
+      const { features } = await fetchJson(`${endpoint}?${params}`, {
+        ...fetchOptions,
+        context:`${service} page at offset ${offset}`,
+        validate(payload) {
+          validateArcgisPayload(payload);
+          if (!Array.isArray(payload.features)) throw new Error('ArcGIS response is missing a features array');
+          if (payload.features.length !== expected)
+            throw new Error(`ArcGIS returned ${payload.features.length}/${expected} expected features`);
+          if (payload.features.some(feature => !feature || typeof feature !== 'object' || Array.isArray(feature)))
+            throw new Error('ArcGIS returned an invalid feature');
+        }
+      });
       pages[pageIndex] = features.map(feature => ({
         geometry:feature.geometry || null,
         properties:feature.properties || feature.attributes || {}
@@ -99,7 +142,7 @@ export async function arcgisFeatures(service, options = {}) {
   };
   await Promise.all(Array.from({ length:Math.min(options.concurrency || 3, offsets.length) }, worker));
   const features = pages.flat();
-  if (features.length < count) throw new Error(`${service} returned ${features.length}/${count} features`);
+  if (features.length !== count) throw new Error(`${service} returned ${features.length}/${count} features`);
   return features;
 }
 
